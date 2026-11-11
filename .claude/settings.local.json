@@ -57,7 +57,9 @@
       "Bash(sed -i '' 's/TD Banque/Desjardins/g' index.js)",
       "Bash(sed -i '' 's/TD account/Desjardins account/g' index.js)",
       "Bash(sed -i '' 's/ TD / Desjardins /g' index.js)",
-      "Bash(sed -i '' 's/Toronto-Dominion/Desjardins/g' index.js)"
+      "Bash(sed -i '' 's/Toronto-Dominion/Desjardins/g' index.js)",
+      "Bash(git add *)",
+      "Bash(git commit -m ' *)"
     ]
   }
 }
